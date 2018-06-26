@@ -1,72 +1,121 @@
 using OhMyJulia
-using Knet
 using JLD2
+using FileIO
 
-struct FFM{T}
+const ϵ = .1
+
+struct FFM{T<:Real}
     w::Vector{T}
     V::Matrix{Vector{T}}
 end
 
-function FFM{T}(n::Integer, nf::Integer, k::Integer=4) where T
-    FFM{T}(0 ++ rand(T, n), [rand(T, k) for i in 1:n, j in 1:nf])
+function FFM{T}(n::Int, nf::Int, k::Int=4) where T<:Real
+    FFM{T}(0 ++ rand(T, n), [rand(T, k) - .5 for i in 1:n, j in 1:nf])
 end
 
-function predict(m, X::Vector{Tuple{Int, Int}})
-    w, V = m
+struct Trainer{T<:Real} # RMSProp
+    gw::Vector{T}
+    gV::Matrix{Vector{T}}
+    vw::Vector{T}
+    vV::Matrix{Vector{T}}
+end
+
+function Trainer(m::FFM{T}) where T
+    t = Trainer{T}(deepcopy(m.w), deepcopy(m.V), deepcopy(m.w), deepcopy(m.V))
+    reset!(t, true)
+    t
+end
+
+function reset!(t::Trainer, acc=false)
+    t.gw .= 0
+    for v in t.gV
+        v .= 0
+    end
+
+    acc || return
+
+    t.vw .= 0
+    for v in t.vV
+        v .= 0
+    end
+end
+
+function predict(m, X)
     n = length(X)
 
-    s = car(w) + mapreduce(x->w[car(x) + 1], +, X)
+    s = car(m.w) + mapreduce(x->m.w[car(x) + 1], +, X)
     for k1 in 1:n, k2 in k1+1:n
         i, fi = X[k1]
         j, fj = X[k2]
 
-        # due to a bug of AutoGrad #73 here we need to indexing mannually. and remenber that julia is column-major
-        offset = nrow(V)
-        s += V[i + offset * (fj - 1)]' * V[j + offset * (fi - 1)]
+        s += m.V[i, fj]' * m.V[j, fi]
     end
 
     s
 end
-predict(m::FFM, X) = predict((m.w, m.V), X)
+
+function learn!(m, t, X, y)
+    Δ = predict(m, X) - y
+
+    t.gw[1] += Δ
+    for (i, fi) in X
+        t.gw[i+1] += Δ
+    end
+
+    n = length(X)
+    for k1 in 1:n, k2 in k1+1:n
+        i, fi = X[k1]
+        j, fj = X[k2]
+
+        t.gV[i, fj] .+= Δ .* m.V[j, fi]
+        t.gV[j, fi] .+= Δ .* m.V[i, fj]
+    end
+end
+
+function step!(m, t, lr=.1, L2=.001, γ = .9)
+    @. t.vw = γ * t.vw + (1 - γ) * t.gw ^ 2
+    for (vv, gv) in zip(t.vV, t.gV)
+        @. vv += γ * vv + (1 - γ) * gv ^ 2
+    end
+
+    m.w .*= 1 - L2
+    @. m.w -= lr * t.gw / sqrt(t.vw + ϵ)
+    for (v, vv, gv) in zip(m.V, t.vV, t.gV)
+        v .*= 1 - L2
+        @. v -= lr * gv / sqrt(vv + ϵ)
+    end
+
+    reset!(t)
+end
 
 function loss(m, X, y)
     .5(predict(m, X) - y) ^ 2
 end
 
-# dirty hack
-import Base.+
-(+)(::Void, ::Void) = nothing
-(+)(x, ::Void) = x
-(+)(::Void, x) = x
-
-function step!(m::FFM, Xs, ys, o)
-    m = m.w, m.V
-    g = grad(loss)
-    ∇ = mapreduce(x->g(m, car(x), cadr(x)), (a,b)->a.+b, zip(Xs, ys))
-    update!(m, ∇, o)
-end
-
-function train(train_file, test_file, o=Adam; kwargs...)
+function train(train_file, test_file)
     trainX, trainy, n1, nf1 = read_libsvm(train_file)
-    testX , testy, n2, nf2  = read_libsvm(test_file)
+    testX,  testy,  n2, nf2 = read_libsvm(test_file)
 
     n, nf = max(n1, n2), max(nf1, nf2)
     m = FFM{f64}(n, nf)
-    o = optimizers((m.w, m.V), o, kwargs...)
+    t = Trainer(m)
 
     L = mapreduce(x->loss(m, car(x), cadr(x)), +, zip(testX, testy))
     println("epoch: 0, loss: $L")
 
-    for epoch = 1:5
-        last = 1
-        for i in 10:10:length(trainy)
-            step!(m, trainX[last:i], trainy[last:i], o)
-            last = i+1
+    best = (nothing, Inf)
+    for epoch = 1:50
+        for i in 1:length(trainy)
+            learn!(m, t, trainX[i], trainy[i])
+            i % 10 == 0 && step!(m, t)
         end
 
         L = mapreduce(x->loss(m, car(x), cadr(x)), +, zip(testX, testy))
+        best = L < cadr(best) ? (deepcopy(m), L) : best
         println("epoch: $epoch, loss: $L")
     end
+
+    save("models.jld2", Dict("last" => m, "best" => car(best)))
 end
 
 function read_libsvm(file)
