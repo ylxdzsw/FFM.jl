@@ -75,7 +75,7 @@ end
 function step!(m, t, lr=.1, L2=.001, γ = .9)
     @. t.vw = γ * t.vw + (1 - γ) * t.gw ^ 2
     for (vv, gv) in zip(t.vV, t.gV)
-        @. vv += γ * vv + (1 - γ) * gv ^ 2
+        @. vv = γ * vv + (1 - γ) * gv ^ 2
     end
 
     m.w .*= 1 - L2
