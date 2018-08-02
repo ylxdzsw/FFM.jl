@@ -10,7 +10,7 @@ struct FFM{T<:Real}
 end
 
 function FFM{T}(n::Int, nf::Int, k::Int=4) where T<:Real
-    FFM{T}(0 ++ rand(T, n), [rand(T, k) - .5 for i in 1:n, j in 1:nf])
+    FFM{T}(zeros(T, n+1), [rand(T, k) - .5 for i in 1:n, j in 1:nf])
 end
 
 struct Trainer{T<:Real} # RMSProp
@@ -54,8 +54,8 @@ function predict(m, X)
     s
 end
 
-function learn!(m, t, X, y)
-    Δ = predict(m, X) - y
+function learn!(m, t, X, y, clip=Inf)
+    Δ = max(min(predict(m, X) - y, clip), -clip)
 
     t.gw[1] += Δ
     for (i, fi) in X
@@ -72,10 +72,10 @@ function learn!(m, t, X, y)
     end
 end
 
-function step!(m, t, lr=.1, L2=.001, γ = .9)
-    @. t.vw = γ * t.vw + (1 - γ) * t.gw ^ 2
+function step!(m, t, lr=.1, L2=1e-4, γ = .99)
+    @. t.vw = γ * t.vw + t.gw ^ 2
     for (vv, gv) in zip(t.vV, t.gV)
-        @. vv = γ * vv + (1 - γ) * gv ^ 2
+        @. vv = γ * vv + gv ^ 2
     end
 
     m.w .*= 1 - L2
